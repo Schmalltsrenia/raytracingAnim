@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Peppa Pig</title>
+</head>
+<style type="text/css">
+
+	html, body {
+		width: 100%;
+		height: 100%;
+	}
+	* {
+		margin: 0;
+		padding: 0;
+	}
+
+</style>
+
+<body onload="main()">
+	<canvas id="webgl" width="100" height="100"></canvas>
+</body>
+
+<script type="x-webgl/x-vertex-shader" id="vertexShader">
+	attribute vec2 aVertexPosition;
+	varying vec2 v_texCoord;
+	void main() {
+		v_texCoord = aVertexPosition;
+		gl_Position = vec4(aVertexPosition, 0.0, 1.0);
+	}
+</script>
+
+<script type="x-webgl/x-fragment-shader" id="fragmentShader">
+	//reference: https://www.shadertoy.com/view/MtcXWr
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+#define PI 3.14159265359
+#define MAX_BOUNCES 2
+
+uniform vec2 resolution;
+uniform float time;
+const int MAX_MARCHING_STEPS = 255;
+const float MIN_DIST = 0.0;
+const float MAX_DIST = 100.0;
+const float EPSILON = 0.0001;
+
+float epsilon = 4e-4;
+float gamma = 2.2;
+
+float hash(float x) { return fract(sin(x) * 43758.5453); }
+
+mat2 rotate2d(float _angle){
+    return mat2(cos(_angle),-sin(_angle),
+                sin(_angle),cos(_angle));
+}
+
+struct Material
+{
+    vec3 c; 
+    float f0;
+};
+
+struct Ray
+{
+    vec3 o;
+    vec3 d; 
+};
+
+struct Hit
+{
+    float t;
+    vec3 n;
+    Material m; 
+};
+const Hit noHit = Hit(1e10, vec3(0.), Material(vec3(-1.), -1.));
+
+struct Plane
+{
+    float d;
+    vec3 n;
+    Material m;
+};
+
+struct Tiktok
+{
+    Material m;
+};
+
+struct SolidAngle
+{
+    vec3 p;
+    vec3 offset;
+    Material m;
+};
+float sdCappedCylinder(vec3 p, float h, float r) {
+    vec2 d = abs(vec2(length(p.xz), p.y)) - vec2(h, r);
+    return min(max(d.x, d.y), .0) + length(max(d, .0));
+}
+float sdRing(vec3 p, float h, float r1, float r2) {
+    float cylinder1 = sdCappedCylinder(p, min(r1, r2), h * 2.);
+    float cylinder2 = sdCappedCylinder(p, max(r1, r2), h);
+    return max(-cylinder1, cylinder2);
+}
+float sdBox(vec3 p, vec3 b){
+    vec3 d = abs(p) - b;
+    return min(max(d.x, max(d.y, d.z)), 0.0) + length(max(d, 0.0));
+}
+float sdSolidAngle(vec3 p, vec2 c, float ra) {
+    vec2 q = vec2(length(p.xz), p.y);
+    float l = length(q) - ra;
+    float m = length(q - c * clamp(dot(q, c), .0, ra));
+    return max(l, m * sign(c.y * q.x - c.x * q.y));
+}
+float sdSolidAngleIns(vec3 p, vec3 offset) {
+    p /= 2.;
+    p.yz *= rotate2d(radians(20.));
+    p.xz *= rotate2d(time);
+    return sdSolidAngle(p + offset, vec2(3, 4)/5., .2);
+}
+float sdTiktok(vec3 p) {
+    p /= 3.;
+    p -= vec3(0.07 * sin(2.5*time), .27 + 0.07 * sin(5.*time), .0);
+    //p.x = -p.x;
+    p.yz *= rotate2d(radians(90.));
+    p.xz *= rotate2d(radians(5.*cos(2.5*time)));
+    float cylinder1 = sdCappedCylinder(p, .2, .03);
+    float cylinder2 = sdCappedCylinder(p, .08, .15);
+    float ring1 = sdRing(p, .03, .2, .08);
+    float ring2 = sdRing((p - vec3(.33, .0, .5)), .03, .25, .13);
+    float box1 = sdBox(p - vec3(.04, .0, .2), vec3(.04, .05, .2));
+    float box2 = sdBox(p - vec3(.14, .0, .25), vec3(.06, .03, .25));
+    float box3 = sdBox(p - vec3(.3, .0, .75), vec3(.3, .06, .25));
+    float box4 = sdBox(p - vec3(.55, .0, .5), vec3(.2, .06, .25));
+    float d = ring1;
+    d = max(d, -box1);
+    d = min(d, box2);
+    d = min(d, ring2);
+    d = max(d, -box3);
+    d = max(d, -box4);
+    return d;
+}
+vec3 shapeNormal(vec3 p){
+    return normalize(vec3(
+        sdTiktok(vec3(p.x + EPSILON, p.y, p.z)) - sdTiktok(vec3(p.x - EPSILON, p.y, p.z)),
+        sdTiktok(vec3(p.x, p.y + EPSILON, p.z)) - sdTiktok(vec3(p.x, p.y - EPSILON, p.z)),
+        sdTiktok(vec3(p.x, p.y, p.z + EPSILON)) - sdTiktok(vec3(p.x, p.y, p.z - EPSILON))
+    ));
+}
+vec3 solidAngleNormal(vec3 p, vec3 offset) {
+    return normalize(vec3(
+        sdSolidAngleIns(vec3(p.x + EPSILON, p.y, p.z), offset) - sdSolidAngleIns(vec3(p.x - EPSILON, p.y, p.z), offset),
+        sdSolidAngleIns(vec3(p.x, p.y + EPSILON, p.z), offset) - sdSolidAngleIns(vec3(p.x, p.y - EPSILON, p.z), offset),
+        sdSolidAngleIns(vec3(p.x, p.y, p.z + EPSILON), offset) - sdSolidAngleIns(vec3(p.x, p.y, p.z - EPSILON), offset)
+    ));
+}
+
+
+Hit intersectPlane(Plane p, Ray r)
+{
+    float dotnd = dot(p.n, r.d);
+    if (dotnd > 0.) return noHit;
+
+    float t = -(dot(r.o, p.n) + p.d) / dotnd;
+    return Hit(t, p.n, p.m);
+}
+
+Hit intersectTiktok(Tiktok t, Ray r) {
+    float depth = 0.;
+    float max_t = 0.;
+    vec3 norm;
+    vec3 pos;
+    for (int i = 0; i < MAX_MARCHING_STEPS; i ++) {
+        float dist = sdTiktok(r.o + depth * r.d);
+        if (dist < EPSILON) {
+            max_t = depth;
+            pos = r.o + depth * r.d;
+            norm = shapeNormal(pos);
+            return Hit(max_t, norm, t.m);
+        }
+        depth += dist;
+        if (depth >= MAX_DIST) {
+            return noHit;
+        }
+    }
+    return noHit;
+}
+Hit intersectSolidAngle(SolidAngle sa, Ray r) {
+    float depth = 0.;
+    float max_t = 0.;
+    vec3 norm;
+    vec3 pos;
+    for (int i = 0; i < MAX_MARCHING_STEPS; i ++) {
+        float dist = sdSolidAngleIns(r.o + depth * r.d, sa.offset);
+        if (dist < EPSILON) {
+            max_t = depth;
+            pos = r.o + depth * r.d;
+            norm = solidAngleNormal(pos, sa.offset);
+            return Hit(max_t, norm, sa.m);
+        }
+        depth += dist;
+        if (depth >= MAX_DIST) {
+            return noHit;
+        }
+    }
+    return noHit;
+}
+
+
+vec3 randomVector(float seed)
+{
+    float r2 = hash(seed);
+    float phi = 2. * PI * hash(seed + r2);
+    float sina = sqrt(r2);
+    float cosa = sqrt(1. - r2);
+
+    return vec3(cos(phi) * sina, cosa, sin(phi) * sina);
+}
+
+bool compare(inout Hit a, Hit b)
+{
+    if (b.m.f0 >= 0. && b.t < a.t)
+    {
+        a = b;
+        return true;
+    }
+    return false;
+}
+
+Hit intersectScene(Ray r)
+{
+    Plane p  = Plane(0., vec3(0., 1., 0.), Material(vec3(0.25,0.15,0.05), 0.04));
+    Tiktok t = Tiktok(Material(vec3(0.4), 0.2));
+    SolidAngle sa = SolidAngle(vec3(0., 0., 0.), vec3(.01, -0.3 + 0.2 * sin(3.*time), .5), Material(vec3(1., 0., 0.), 0.02));
+    SolidAngle sa2 = SolidAngle(vec3(0., 0., 0.), vec3(-.01, -0.3 +0.2 * cos(3.*time), -.5), Material(vec3(1., 0., 0.), 0.02));
+    SolidAngle sa3 = SolidAngle(vec3(0., 0., 0.), vec3(-.5, -0.3 + 0.2 * sin(3.*time+1.5), -.0), Material(vec3(1., 0., 0.), 0.02));
+    SolidAngle sa4 = SolidAngle(vec3(0., 0., 0.), vec3(.4, -0.3+0.2 * cos(3.*time+1.5), -.0), Material(vec3(1., 0., 0.), 0.02));
+
+    Hit hit = noHit;
+    compare(hit, intersectPlane(p, r));
+    compare(hit, intersectTiktok(t, r));
+    compare(hit, intersectSolidAngle(sa, r));
+    compare(hit, intersectSolidAngle(sa2, r));
+    compare(hit, intersectSolidAngle(sa3, r));
+    compare(hit, intersectSolidAngle(sa4, r));
+    return hit;
+}
+
+struct DirectionalLight
+{
+    vec3 d; 
+    vec3 c;
+};
+
+DirectionalLight sunLight = DirectionalLight(normalize(vec3(1., .5, .5)), vec3(1e3));
+vec3 skyColor(vec3 d)
+{
+    float transition = pow(smoothstep(0.02, .5, d.y), 0.4);
+
+    vec3 sky = 2e2*mix(vec3(0.350,0.990,1.000), vec3(0.12, 0.43, 1), transition);
+    vec3 sun = sunLight.c * pow(abs(dot(d, sunLight.d)), 5000.);
+    return sky + sun;
+}
+
+float pow5(float x) { return x * x * x * x * x; }
+
+
+float fresnel(vec3 h, vec3 v, float f0)
+{
+    return pow5(1. - clamp(dot(h, v), 0., 1.)) * (1. - f0) + f0;
+}
+vec3 accountForDirectionalLight(vec3 p, vec3 n, DirectionalLight l)
+{
+    if (intersectScene(Ray(p + epsilon * l.d, l.d)).m.f0 < 0.)
+    {
+        return clamp(dot(n, l.d), 0., 1.) * l.c;
+    }
+    return vec3(0.);
+}
+vec3 radiance(Ray r)
+{
+    vec3 accum = vec3(0.);
+    vec3 attenuation = vec3(1.);
+
+    for (int i = 0; i <= MAX_BOUNCES; ++i)
+    {
+        Hit hit = intersectScene(r);
+
+        if (hit.m.f0 >= 0.)
+        {
+            float f = fresnel(hit.n, -r.d, hit.m.f0);
+
+            vec3 hitPos = r.o + hit.t * r.d;
+
+            // Diffuse
+            vec3 incoming = vec3(0.);
+            incoming += accountForDirectionalLight(hitPos, hit.n, sunLight);
+
+            accum += (1. - f) * attenuation * hit.m.c * incoming;
+
+            // Specular: next bounce
+            attenuation *= f;
+            vec3 d = reflect(r.d, hit.n);
+            r = Ray(r.o + hit.t * r.d + epsilon * d, d);
+        }
+        else
+        {
+            accum += attenuation * skyColor(r.d);
+            break;
+        }
+    }
+    return accum;
+}
+vec3 Uncharted2ToneMapping(vec3 color)
+{
+    float A = 0.15;
+    float B = 0.50;
+    float C = 0.10;
+    float D = 0.20;
+    float E = 0.02;
+    float F = 0.30;
+    float W = 11.2;
+    float exposure = 0.012;
+    color *= exposure;
+    color = ((color * (A * color + C * B) + D * E) / (color * (A * color + B) + D * F)) - E / F;
+    float white = ((W * (A * W + C * B) + D * E) / (W * (A * W + B) + D * F)) - E / F;
+    color /= white;
+    color = pow(color, vec3(1. / gamma));
+    return color;
+}
+
+vec3 rayDirection(float fieldOfView, vec2 size, vec2 fragCoord){
+    vec2 xy = fragCoord - size / 2.;
+    float z = size.y / tan(radians(fieldOfView) / 2.);
+    return normalize(vec3(xy, -z));
+}
+
+mat3 setCamera(in vec3 ro, in vec3 ta, float cr){
+    vec3 cw = normalize(ta - ro);
+    vec3 cp = vec3(sin(cr), cos(cr), .0);
+    vec3 cu = normalize(cross(cw, cp));
+    vec3 cv = cross(cu, cw);
+    return mat3(cu, cv, cw);
+}
+
+void main(){
+    vec3 color = vec3(0.0);
+    
+    vec2 uv = 2. * gl_FragCoord.xy / resolution.xy - 1.;
+
+    float o1 = 0.25;
+    float o2 = 0.75;
+    vec2 msaa[4];
+    msaa[0] = vec2( o1,  o2);
+    msaa[1] = vec2( o2, -o1);
+    msaa[2] = vec2(-o1, -o2);
+    msaa[3] = vec2(-o2,  o1);
+    for (int i = 0; i < 4; ++i)
+    {
+        vec3 p0 = vec3(0., 1.1, 3.);
+        p0.yz *= rotate2d(0.1*sin(time));
+        vec3 p = p0;
+        vec3 offset = vec3(msaa[i] / resolution.y, 0.);
+        vec3 d = normalize(vec3(resolution.x/resolution.y * uv.x, uv.y, -1.5) + offset);
+        Ray r = Ray(p, d);
+        color += radiance(r) / 4.;
+    }
+
+    gl_FragColor = vec4(Uncharted2ToneMapping(color),1.0);
+}
+
+</script>
+<script type="text/javascript">
+	var vertexShader = document.getElementById("vertexShader").text,
+		fragmentShader = document.getElementById("fragmentShader").text;
+</script>
+
+<script type="text/javascript">
+	function main() {
+		var drawing = document.getElementById("webgl"), gl;
+		drawing.width = "500";
+		drawing.height = "500";
+		if(drawing.getContext) {
+			try{
+				gl = drawing.getContext("experimental-webgl", {alpha: true});
+			} catch(ex) {
+				// do nothing
+			}
+			if(gl) {
+				// console.table([{no_error: gl.NO_ERROR, invalid_enum: gl.INVALID_ENUM, invalid_value: gl.INVALID_VALUE, invalid_operation: gl.INVALID_OPERATION, out_of_memory: gl.OUT_OF_MEMORY, context_lost_webgl: gl.CONTEXT_LOST_WEBGL}]);
+
+				// use webgl
+				gl.clearColor(1, 1, 1, 1);
+				gl.clear(gl.COLOR_BUFFER_BIT);
+				gl.viewport(0, 0, drawing.width, drawing.height);
+				var buffer = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0.5, 1]), gl.STATIC_DRAW);
+
+				var vertShader = gl.createShader(gl.VERTEX_SHADER);
+				var fragShader = gl.createShader(gl.FRAGMENT_SHADER);
+				var program = gl.createProgram();
+				var parameters = { time: +new Date() / 1000, resolution: [drawing.width, drawing.height] };
+				var flag = true;
+				function render() {
+					gl.shaderSource(vertShader, vertexShader);
+					gl.compileShader(vertShader);
+					gl.shaderSource(fragShader, fragmentShader);
+					gl.compileShader(fragShader);
+					if(flag) {
+						flag = false;
+						gl.attachShader(program, vertShader);
+						gl.attachShader(program, fragShader);
+					}
+					gl.linkProgram(program);
+					gl.useProgram(program);
+					var loc_time = gl.getUniformLocation(program, "time");
+					var loc_resolution = gl.getUniformLocation(program, "resolution");
+					gl.uniform1f(loc_time, +new Date() / 1000 - parameters.time);
+					gl.uniform2f(loc_resolution, parameters.resolution[0], parameters.resolution[1])
+
+					var aVertexPosition = gl.getAttribLocation(program, "aVertexPosition");
+					// console.log("aVertexPosition", aVertexPosition);
+					gl.enableVertexAttribArray(aVertexPosition);
+					// if(!gl.getShaderParameter(vertShader, gl.COMPILE_STATUS)) {
+					// 	console.log("compile error\n", gl.getShaderInfoLog(vertShader));
+					// }
+					// if(!gl.getShaderParameter(fragShader, gl.COMPILE_STATUS)) {
+					// 	console.log("compile error\n", gl.getShaderInfoLog(fragShader));
+					// }
+					// if(!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+					// 	console.log("link error\n", gl.getProgramInfoLog(program));
+					// }
+					// var errorCode = gl.getError();
+					// while(errorCode) {
+					// 	console.log("Error occurred: " + errorCode);
+					// 	errorCode = gl.getError();
+					// }
+
+					var vertices = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]),
+						buffer = gl.createBuffer(),
+						vertexSetSize = 2,
+						vertexSetCount = vertices.length / vertexSetSize;
+					gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+					gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+					gl.vertexAttribPointer(aVertexPosition, vertexSetSize, gl.FLOAT, false, 0, 0);
+					gl.drawArrays(gl.TRIANGLES, 0, vertexSetCount);
+
+					requestAnimationFrame(render);
+				}
+				render();
+
+			} else {
+				console.log("webgl not supported");
+			}
+		}
+	}
+</script>
+</html>
